@@ -1,119 +1,131 @@
 package net.scalax.leafa.slickimpl
 
-import slick.lifted.Rep
-import net.scalax.{ leafa => baseLeafa }
-import slick.ast.{ BaseTypedType, OptionTypedType, Select, TypedType }
-import slick.jdbc.JdbcType
+import net.scalax.{leafa => baseLeafa}
+import slick.ast.TableNode
+import slick.jdbc._
 
-import scala.annotation.tailrec
+import scala.language.implicitConversions
 
-case class LeftData(sql: String, left: List[Any])
+case class LeftData(sql: SQLActionBuilder)
+
+trait SlickHelper {
+  implicit def actionBasedSQLInterpolation(s: StringContext): ActionBasedSQLInterpolation = new ActionBasedSQLInterpolation(s)
+
+  implicit class asfjawhterhtierhnt(a: SQLActionBuilder) {
+    def concat(b: SQLActionBuilder): SQLActionBuilder = {
+      SQLActionBuilder(a.queryParts ++ b.queryParts, new SetParameter[Unit] {
+        def apply(p: Unit, pp: PositionedParameters): Unit = {
+          a.unitPConv.apply(p, pp)
+          b.unitPConv.apply(p, pp)
+        }
+      })
+    }
+  }
+}
+
+object SlickHelper extends SlickHelper
 
 trait SlickDBIOAstBase extends baseLeafa.BaseAst {
 
   type DataType
-  def takeColumn(list: DataType, params: List[Any]): LeftData
-  def addBaseTypedType(list: List[TypedType[_]]): List[TypedType[_]]
+  def takeColumn(list: DataType): LeftData
 
 }
 
 trait SlickDBIOAst[T] extends baseLeafa.BaseAst with SlickDBIOAstBase {
 
   override type DataType = T
-  override def takeColumn(list: T, params: List[Any]): LeftData
-  override def addBaseTypedType(list: List[TypedType[_]]): List[TypedType[_]] = list
+  override def takeColumn(list: T): LeftData
 
 }
 
 trait BlockAst[T] extends baseLeafa.BlockAst with SlickDBIOAst[T] {
 
+  import SlickHelper._
+
   override val content: SlickDBIOAst[T]
 
-  override def takeColumn(list: T, params: List[Any]): LeftData = {
-    val oldSql = content.takeColumn(list, params)
-    LeftData(sql = "(" + oldSql.sql + ")", left = oldSql.left)
+  override def takeColumn(list: T): LeftData = {
+    val oldSql = content.takeColumn(list)
+    LeftData(sql = sql"""(""" concat oldSql.sql concat sql""")""")
   }
-  override def addBaseTypedType(list: List[TypedType[_]]): List[TypedType[_]] = content.addBaseTypedType(list)
 
 }
 
 trait BaseTypedTypeAstBase extends baseLeafa.BaseTypedTypeAst with SlickDBIOAstBase {
 
+  import SlickHelper._
+
   override type DataType
-  override val typedtype: Rep[DataType]
+  val typedtype: SetParameter[DataType]
+  val columnName: String
   override val isParam: Boolean
 
-  override def takeColumn(list: DataType, params: List[Any]): LeftData = {
-    val tpe = typedtype.asInstanceOf[Rep.TypedRep[DataType]].tpe
-    if (!isParam) {
-      @tailrec
-      def withTypedType(typedtype: TypedType[_], data: Any): LeftData = {
-        typedtype match {
-          case baseTypedType: BaseTypedType[_] =>
-            val jdbcTypedType = baseTypedType.asInstanceOf[JdbcType[Any]]
-            LeftData(jdbcTypedType.valueToSQLLiteral(data), params)
-          case optTypedType: OptionTypedType[_] =>
-            data match {
-              case Some(innerData) =>
-                withTypedType(optTypedType.elementType, innerData)
-              case _ => LeftData("null", params)
-            }
-        }
-      }
-      withTypedType(tpe, list)
-    } else {
-      LeftData("?", list :: params)
-    }
+  override def takeColumn(list: DataType): LeftData = {
+    implicit val typedType1 = typedtype
+    LeftData(sql"""${list}""")
   }
-  override def addBaseTypedType(list: List[TypedType[_]]): List[TypedType[_]] = typedtype.asInstanceOf[Rep.TypedRep[DataType]].tpe :: list
 
 }
 
 trait BaseTypedTypeAst[T] extends baseLeafa.BaseTypedTypeAst with BaseTypedTypeAstBase with SlickDBIOAst[T] {
 
   override type DataType = T
-  override val typedtype: Rep[DataType]
+  override val typedtype: SetParameter[DataType]
+  override val columnName: String
 
-  override def takeColumn(list: T, params: List[Any]): LeftData = super.takeColumn(list, params)
-  override def addBaseTypedType(list: List[TypedType[_]]): List[TypedType[_]] = super.addBaseTypedType(list)
+  override def takeColumn(list: T): LeftData = super.takeColumn(list)
 
 }
 
 object BaseTypedTypeAst {
-  def apply[T](rep: Rep[T], isParam: Boolean = false): BaseTypedTypeAst[T] = {
-    val rep1 = rep
-    val isParam1 = isParam
+
+  def apply[T](columnName: String, isParam: Boolean = false)(implicit rep: SetParameter[T]): BaseTypedTypeAst[T] = {
+    val rep1        = rep
+    val isParam1    = isParam
+    val columnName1 = columnName
     new BaseTypedTypeAst[T] {
-      override val typedtype = rep1
-      override val isParam = isParam1
+      override val typedtype  = rep1
+      override val isParam    = isParam1
+      override val columnName = columnName1
     }
   }
+
 }
 
 trait SimpleInsert extends baseLeafa.SimpleInsert with SlickDBIOAst[List[Any]] {
 
-  override val typedTypeAstList: List[BaseTypedTypeAstBase]
-  val tableName: String
+  import SlickHelper._
 
-  override def takeColumn(lawData: List[Any], params: List[Any]): LeftData = {
-    val tpeList = typedTypeAstList.map(t => t.typedtype)
-    val columnNames = tpeList.map { s =>
-      s.toNode match {
-        case Select(_, symbol) => symbol.name
-      }
+  override val typedTypeAstList: List[BaseTypedTypeAstBase]
+
+  val profile: JdbcProfile
+
+  override val tableName: TableNode
+
+  override def takeColumn(lawData: List[Any]): LeftData = {
+    val columnSize = typedTypeAstList.size
+    val (columnSql, _) = typedTypeAstList.foldLeft((sql"""""", 0)) {
+      case ((action, index), item) =>
+        val newAction = if (index < columnSize - 1) {
+          sql"""#${profile.quoteIdentifier(item.columnName)}, """
+        } else {
+          sql"""#${profile.quoteIdentifier(item.columnName)}"""
+        }
+        (action concat newAction, index + 1)
     }
-    val (values, leftLawData, left) = typedTypeAstList.foldLeft((List.empty[String], lawData, params)) {
-      case ((currentValues, newLawData, leftParam), typedTypeBase) =>
-        val LeftData(sql, newParams) = typedTypeBase.takeColumn(newLawData.head.asInstanceOf[typedTypeBase.DataType], leftParam)
-        (sql :: currentValues, newLawData.tail, newParams)
+
+    val (resultSql, _, _) = typedTypeAstList.foldLeft((sql"""""", 0, lawData)) {
+      case ((action, index, currentData :: leftData), item) =>
+        val newAction = if (index < columnSize - 1) {
+          item.takeColumn(currentData.asInstanceOf[item.DataType]).sql concat sql""", """
+        } else {
+          item.takeColumn(currentData.asInstanceOf[item.DataType]).sql
+        }
+        (action concat newAction, index + 1, leftData)
     }
-    LeftData(sql = s"""insert into ${tableName} (${columnNames.mkString(",")}) values (${values.reverse.mkString(",")})""", left = left)
-  }
-  override def addBaseTypedType(list: List[TypedType[_]]): List[TypedType[_]] = {
-    typedTypeAstList.foldLeft(list) { (left, item) =>
-      val newData = item.addBaseTypedType(left)
-      newData
-    }
+
+    LeftData(sql"""insert into #${profile.quoteTableName(tableName)} (""" concat columnSql concat sql""") values (""" concat resultSql concat sql""")""")
   }
 
 }

@@ -1,6 +1,6 @@
 package net.scalax.leafa
 
-import slick.lifted.Rep
+import slick.ast.TableNode
 
 trait BaseAst
 
@@ -11,7 +11,6 @@ trait BlockAst extends BaseAst {
 trait BaseTypedTypeAst extends BaseAst {
 
   type DataType
-  val typedtype: Rep[DataType]
   val isParam: Boolean
 
 }
@@ -19,5 +18,6 @@ trait BaseTypedTypeAst extends BaseAst {
 trait SimpleInsert extends BaseAst {
 
   val typedTypeAstList: List[BaseTypedTypeAst]
+  val tableName: TableNode
 
 }
