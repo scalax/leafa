@@ -1,37 +1,32 @@
 package net.scalax.leafa.slickimpl
 
-import slick.ast.Select
+import net.scalax.asuna.slick.umr.rmu.{ExtMethod, RmuWriterQuery}
 import slick.jdbc.H2Profile.api._
-import slick.jdbc.{JdbcProfile, SetParameter}
 
 import scala.concurrent.{duration, Await, Future}
 
 case class Friends(
-  id: Option[Long] = None,
-  name: String,
-  nick: String,
-  age: Int
+    id: Option[Long] = None
+  , name: String
+  , nick: String
+  , age: Int
 )
 
-class FriendTable(tag: slick.lifted.Tag) extends Table[Friends](tag, "friend") {
+class FriendTable(tag: slick.lifted.Tag) extends Table[Friends](tag, "friend") with RmuWriterQuery {
+  self =>
 
-  def id   = column[Long]("id", O.AutoInc)
-  def name = column[String]("name")
-  def nick = column[String]("nick")
-  def age  = column[Int]("age")
+  val ext = ExtMethod
 
-  def * = (id.?, name, nick, age).mapTo[Friends]
+  def id1      = column[Option[Long]]("id", O.AutoInc)
+  def commonId = id1
+  def id       = ext.liftCol(id1) ++ 3 - 6
+  def name     = column[String]("name")
+  def nick     = column[String]("nick")
+  def age      = column[Int]("age")
 
-  def abc[T](rep: Rep[T])(implicit set: SetParameter[T]) = {
-    BaseTypedTypeAst(rep.asInstanceOf[Rep.TypedRep[T]].toNode.asInstanceOf[Select].field.name, true)
-  }
+  lazy val columnAsts = rmu.effect(rmu.caseOnly[FriendTable, Friends].compileEncoder2222.inputTable(self)).withCols(self.tableNode)
 
-  lazy val columnAsts = List(
-    abc(id),
-    abc(name),
-    abc(nick),
-    abc(age)
-  )
+  def * = (commonId, name, nick, age).mapTo[Friends]
 
 }
 
@@ -47,37 +42,26 @@ object SqlGen extends App {
 
   val friendTable = TableQuery[FriendTable].baseTableRow
 
-  val tableInsert = {
-    new SimpleInsert {
-      override val typedTypeAstList = friendTable.columnAsts
-      override val tableName        = friendTable.tableNode
-      override val profile          = implicitly[JdbcProfile]
-    }
-  }
-
-  //LeftData(insert into firend (id,name,nick,age) values (23,'sdfsaetgrest','fsdtgsertyert',98),List())
   await(
-    db.run(
-      tableInsert.takeColumn(List(23L, "sdfsaetgrest", "fsdtgsertyert", 98)).sql.asUpdate
+      db.run(
+        friendTable.columnAsts.inputData(Friends(Option(23L), "fsdtgsertyert", "sdfsaetgrest", 98))
     )
   )
 
   await(
-    db.run(
-      tableInsert.takeColumn(List(23L, "sdfsaetgrest", "fsdtgsertyert", 98)).sql.asUpdate
+      db.run(
+        friendTable.columnAsts.inputData(Friends(Option(23L), "sdfsaetgrest", "fsdtgsertyert", 98))
     )
   )
 
   await(
-    db.run(
-      tableInsert.takeColumn(List(23L, "sdfsaetgrest", "fsdtgsertyert", 98)).sql.asUpdate
+      db.run(
+        friendTable.columnAsts.inputData(Friends(Option.empty, "sdfsaetgrest", "fsdtgsertyert", 98))
     )
   )
 
   println(
-    await(
-      db.run(friendTable.result)
-    )
+      await(db.run(friendTq.result)).mkString("\n")
   )
 
 }

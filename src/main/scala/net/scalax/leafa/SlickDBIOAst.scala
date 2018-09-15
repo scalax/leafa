@@ -1,29 +1,15 @@
 package net.scalax.leafa.slickimpl
 
+import net.scalax.asuna.slick.umr.rmu
+import net.scalax.asuna.slick.umr.rmu.ExtMethod
 import net.scalax.{leafa => baseLeafa}
-import slick.ast.TableNode
+import slick.ast._
 import slick.jdbc._
+import slick.lifted.Rep
 
 import scala.language.implicitConversions
 
 case class LeftData(sql: SQLActionBuilder)
-
-trait SlickHelper {
-  implicit def actionBasedSQLInterpolation(s: StringContext): ActionBasedSQLInterpolation = new ActionBasedSQLInterpolation(s)
-
-  implicit class asfjawhterhtierhnt(a: SQLActionBuilder) {
-    def concat(b: SQLActionBuilder): SQLActionBuilder = {
-      SQLActionBuilder(a.queryParts ++ b.queryParts, new SetParameter[Unit] {
-        def apply(p: Unit, pp: PositionedParameters): Unit = {
-          a.unitPConv.apply(p, pp)
-          b.unitPConv.apply(p, pp)
-        }
-      })
-    }
-  }
-}
-
-object SlickHelper extends SlickHelper
 
 trait SlickDBIOAstBase extends baseLeafa.BaseAst {
 
@@ -41,7 +27,7 @@ trait SlickDBIOAst[T] extends baseLeafa.BaseAst with SlickDBIOAstBase {
 
 trait BlockAst[T] extends baseLeafa.BlockAst with SlickDBIOAst[T] {
 
-  import SlickHelper._
+  import net.scalax.asuna.slick.umr.rmu.SimpleSlickHelper._
 
   override val content: SlickDBIOAst[T]
 
@@ -52,42 +38,75 @@ trait BlockAst[T] extends baseLeafa.BlockAst with SlickDBIOAst[T] {
 
 }
 
-trait BaseTypedTypeAstBase extends baseLeafa.BaseTypedTypeAst with SlickDBIOAstBase {
+trait SqlColumnBase {
+  import net.scalax.asuna.slick.umr.rmu.SimpleSlickHelper._
 
-  import SlickHelper._
+  type DataType
+  val columnName: String
+  def lawDataToSql(list: DataType): LeftData
+  def dataToSql(list: DataType): LeftData = LeftData(sql"""(""" concat lawDataToSql(list).sql concat sql""")""")
+}
+
+trait SqlColumn[T] extends SqlColumnBase {
+  override type DataType = T
+  override def lawDataToSql(list: T): LeftData
+  override def dataToSql(list: T): LeftData = super.dataToSql(list)
+}
+
+object SqlColumn {
+  def apply[R](colName: String, tran: R => LeftData): SqlColumn[R] = new SqlColumn[R] {
+    override def lawDataToSql(list: R): LeftData = tran(list)
+    override val columnName                      = colName
+  }
+
+  implicit def extMethods[T](col: SqlColumn[T]): ExtMethod.ExtMoethods[T] = new rmu.ExtMethod.ExtMoethods[T] {
+    override val base: SqlColumn[T] = col
+  }
+}
+
+trait BaseTypedTypeAstBase extends baseLeafa.BaseTypedTypeAst with SqlColumnBase {
 
   override type DataType
-  val typedtype: SetParameter[DataType]
-  val columnName: String
+
+  override val typedtype: Type
   override val isParam: Boolean
 
-  override def takeColumn(list: DataType): LeftData = {
-    implicit val typedType1 = typedtype
-    LeftData(sql"""${list}""")
+  val columnName: String
+
+  override def lawDataToSql(list: DataType): LeftData = {
+    LeftData(ExtMethod.customSet(t = typedtype, data = list, isParam = isParam))
   }
+
+  override def dataToSql(list: DataType): LeftData = lawDataToSql(list)
 
 }
 
-trait BaseTypedTypeAst[T] extends baseLeafa.BaseTypedTypeAst with BaseTypedTypeAstBase with SlickDBIOAst[T] {
+trait BaseTypedTypeAst[T] extends baseLeafa.BaseTypedTypeAst with BaseTypedTypeAstBase with SqlColumn[T] {
 
   override type DataType = T
-  override val typedtype: SetParameter[DataType]
+  override val typedtype: Type
   override val columnName: String
 
-  override def takeColumn(list: T): LeftData = super.takeColumn(list)
+  override def dataToSql(list: T): LeftData = super.dataToSql(list)
 
 }
 
 object BaseTypedTypeAst {
 
-  def apply[T](columnName: String, isParam: Boolean = false)(implicit rep: SetParameter[T]): BaseTypedTypeAst[T] = {
-    val rep1        = rep
-    val isParam1    = isParam
-    val columnName1 = columnName
-    new BaseTypedTypeAst[T] {
-      override val typedtype  = rep1
-      override val isParam    = isParam1
-      override val columnName = columnName1
+  def apply[T](rep: Rep[T]): BaseTypedTypeAst[T] = {
+    rep.toNode match {
+      case Select(_, fieldSymbol @ FieldSymbol(name)) =>
+        new BaseTypedTypeAst[T] {
+          override val typedtype  = fieldSymbol.tpe
+          override val isParam    = true
+          override val columnName = name
+        }
+      case OptionApply(Select(_, fieldSymbol @ FieldSymbol(name))) =>
+        new BaseTypedTypeAst[T] {
+          override val typedtype  = fieldSymbol.tpe.asInstanceOf[TypedType[_]].optionType
+          override val isParam    = true
+          override val columnName = name
+        }
     }
   }
 
@@ -95,9 +114,9 @@ object BaseTypedTypeAst {
 
 trait SimpleInsert extends baseLeafa.SimpleInsert with SlickDBIOAst[List[Any]] {
 
-  import SlickHelper._
+  import net.scalax.asuna.slick.umr.rmu.SimpleSlickHelper._
 
-  override val typedTypeAstList: List[BaseTypedTypeAstBase]
+  val typedTypeAstList: List[SqlColumnBase]
 
   val profile: JdbcProfile
 
@@ -118,9 +137,9 @@ trait SimpleInsert extends baseLeafa.SimpleInsert with SlickDBIOAst[List[Any]] {
     val (resultSql, _, _) = typedTypeAstList.foldLeft((sql"""""", 0, lawData)) {
       case ((action, index, currentData :: leftData), item) =>
         val newAction = if (index < columnSize - 1) {
-          item.takeColumn(currentData.asInstanceOf[item.DataType]).sql concat sql""", """
+          item.lawDataToSql(currentData.asInstanceOf[item.DataType]).sql concat sql""", """
         } else {
-          item.takeColumn(currentData.asInstanceOf[item.DataType]).sql
+          item.lawDataToSql(currentData.asInstanceOf[item.DataType]).sql
         }
         (action concat newAction, index + 1, leftData)
     }
